@@ -27,6 +27,7 @@ import string
 import math
 import tempfile
 import crypt
+import datetime
 
 whiptail = "/usr/bin/whiptail"
 rasconf = "/usr/bin/raspi-config"
@@ -39,12 +40,14 @@ def run_as_root():
         print("This process needs to be run as root; requesting elevated privilage.")
         os.execv("/usr/bin/sudo", ["sudo"] + sys.argv)
 
-def ask_something(question, password=False, title=None, default=None):
+def ask_something(question, password=False, title=None, default=None, nocancel=True):
     style = "--passwordbox" if password else "--inputbox"
     args = [whiptail, style, question, "10", "60"]
     if title is not None:
         args.insert(1, "--title")
         args.insert(2, title)
+    if nocancel:
+        args.insert(1, "--nocancel")
     if default:
         args.append(default)
     p = Popen(args, stderr=PIPE)
@@ -60,11 +63,13 @@ def ask_yesno(question, height=10, title=None, default_no=False):
         args.append("--defaultno")
     return not call(args)
 
-def ask_menu(question, options, selected=0, title=None, height=10):
+def ask_menu(question, options, selected=0, title=None, height=10, nocancel=True):
     args = [whiptail, "--radiolist", question, str(height), "60", str(len(options))]
     if title is not None:
         args.insert(1, "--title")
         args.insert(2, title)
+    if nocancel:
+        args.insert(1, "--nocancel")
     for i, o in enumerate(options):
         args.extend([str(i), o, "1" if i == selected else "0"])
     p = Popen(args, stderr=PIPE)
@@ -171,7 +176,7 @@ def edit_config(file_name, pattern, replacement):
 
     # Create a backup of the old configuration settings
     now_time = datetime.datetime.now()
-    with open(file_name+"_"+now_time.format("%Y-%M-%d-%H%M"), "w") as fh:
+    with open(file_name+"_"+now_time.strftime("%Y-%M-%d-%H%M"), "w") as fh:
         for l in orig_lines:
             fh.write(l)
 
@@ -248,7 +253,7 @@ while True:
 # If we got an SSH key, offer to disable password login over the network
 ssh_no_password = False
 if ssh_key:
-    if check_password("pi", "raspberry"):
+    if (not password) and check_password("pi", "raspberry"):
         msgbox("An SSH key was provided but the 'pi' user still has the default password. "
                "Password-based SSH login will be disabled",
                title="Security warning")
@@ -282,8 +287,9 @@ if ask_yesno("Sometimes it is useful for your kiosk display to be rotated or ref
 q = "Finally, what is the URL of the page you like to the Kiosk to display?"
 while True:
     kiosk_url = ask_something(q, title="URL of page to be displayed")
+    kiosk_url = str(kiosk_url, "ASCII")
     if kiosk_url.strip():
-        if urlparse(kiosk_url).scheme == "":
+        if not urlparse(kiosk_url).scheme:
             kiosk_url = "http://"+kiosk_url
         break
     q = "Please enter a valid URL for the kiosk to display:"
@@ -301,7 +307,7 @@ if not ask_yesno("Here are the settings you provided:\n"
                            sshkey = (str(ssh_key[:20], "ASCII") + "...") if ssh_key else "<none>",
                            allowpw = "No" if ssh_no_password else "Yes",
                            orient = orientation, # It would be nice if this was a pretty string
-                           URL=str(kiosk_url, "ASCII")),
+                           URL=kiosk_url),
                  height = 15, title="Confirm settings"):
     print("Kiosk setup aborted.\nGoodbye")
     sys.exit(0)
@@ -360,7 +366,7 @@ raspi_config(["do_boot_behaviour", "B4"])
 # Create script to start Chromium to the correct URL
 
 print("Writing kiosk URL configuration")
-write_file_as_pi("/home/pi/KIOSK_URL", kiosk_url)
+write_file_as_pi("/home/pi/KIOSK_URL", kiosk_url.encode("ASCII"))
 
 script = b"""#!/bin/bash
 BOOT_URL=$(cat /home/pi/KIOSK_URL)

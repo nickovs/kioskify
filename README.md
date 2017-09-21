@@ -8,13 +8,13 @@ Kioskify is designed to be used with the *Jessie* or *Stretch* versions of the R
 
 ## Preparing your Raspberry Pi
 
-If you have an existing, configured and networked RPi which you intend to use as a kiosk then for this stage all you need to do is copy the kioskify script onto that device and ensure that it is readable and executable by the **pi** user.
+If you have an existing, configured and networked RPi that you intend to use as a kiosk then for this stage all you need to do is copy the kioskify script onto that device and ensure that it is readable and executable by the **pi** user.
 
 If you are starting with a fresh install then the easiest way to get Kioskify onto your Pi is to mount the SC Card on your laptop or desktop computer and copy the kioskify script onto the /boot volume.
 
 If you are planning to set up the device over the network (which is often the easiest way) then at this stage you should also `touch` the `/boot/ssh` file on the SD card (the path to this file on your laptop will depend on where you mounted the SD card; on macOS for instance it will probably be `/Volumes/boot/ssh`).
 
-If you plan to have your Raspberry Pi connect to your WiFi network then you can pre-configure the network at this stage by putting the network configuration into `/boot/wpa_supplicant.conf`. At the very minimum you need to include the **network** stanza containing the *ssid*. Hopefully you are are also using some sort of security on you WiFi network and in most cases this means that you'll also need to include the *psk* (pre-shared key) line with your network password. If you expect to ever use the regular desktop environment for the RPi (i.e. log in as a regualar user rather than run in kiosk mode) then you might also want to include the *ctrl_interface* and *update_config* lines which will allow the desktop WiFi tools to find new networks, prompt the user for passwords and generally reconfigure the WiFi. If the device is only ever going to be used as a kiosk device then you can leave these lines out.
+If you plan to have your Raspberry Pi connect to your WiFi network then you can pre-configure the network at this stage by putting the network configuration into `/boot/wpa_supplicant.conf`. At the very minimum you need to include the **network** stanza containing the *ssid*. Hopefully you are are also using some sort of security on you WiFi network and in most cases this means that you'll also need to include the *psk* (pre-shared key) line with your network password. If you expect to ever use the regular desktop environment for the RPi (i.e. log in as a regualar user rather than run in kiosk mode) then you might also want to include the *ctrl_interface* and *update_config* lines which will allow the desktop WiFi tools to find new networks, prompt the user for passwords and generally reconfigure the WiFi. If the device is only ever going to be used as a kiosk device then you can leave these lines out. Below is an example of the format of the `wpa_supplicant.conf` file.
 
 ```
 ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
@@ -29,13 +29,13 @@ network={
 
 ## Running the Kioskify script
 
-Once you have prepared your Raspberry Pi boot the device and log in to a command line as the **pi** user. If this is a newly set up device the password should be **raspberry**. Once logged in as **pi** run the kioskify script. If you copied it to the SD card as described in the previous section then all you need to do is type `/boot/kioskify` and hit return.
+Once you have prepared your Raspberry Pi, boot the device and log in to a command line as the **pi** user. If this is a newly set up device the password should be **raspberry**. Once logged in as **pi** run the kioskify script. If you copied it to the SD card as described in the previous section then all you need to do is type `/boot/kioskify` and hit return.
 
-The kioskify script will ask you a series of fairly self-explanatory questions. If you want to you can skip the next few sections and just try it but in case you want more details below is some more information about each.
+The kioskify script will ask you a series of fairly self-explanatory questions. If you want to you can skip the next few sections and just try it out but in case you want more details below is some more information about each step.
 
 ### Setting the hostname
 
-By default every new Raspberry Pi has its hostname set to `raspberrypi`. Since the device will also by default advertise its name over Mutlicast DNS (mDNS) its easy to end up with lots of devices with the same hostname. In this case the mDNS system will add a number to the end of the hostname so that each device has a different name but that just means that you won't know the name of the device you are after. A much better option is to give each device a different hostname. Try using a name that describes either the function or location of the kiosk.
+By default every new Raspberry Pi has its hostname set to `raspberrypi`. You don't want all your devices having the same name since it makes it difficult to talk to the devices so you probably want to change the host name. Try using a name that describes either the function or location of the kiosk.
 
 > Internally the new hostname is set using the `raspi-config` command. If you wish to change the hostname again at a later date you can either re-run the `kisokify` script, use the `raspi-config` command or manually edit the file `/etc/hostname` and reboot.
 
