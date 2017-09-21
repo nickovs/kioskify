@@ -1,0 +1,417 @@
+#!/usr/bin/env python3
+
+# Copyright 2017 Nicko van Someren
+# SPDX:Apache-2.0
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+import sys
+import os
+import pwd
+import re
+
+from subprocess import *
+from urllib.parse import urlparse
+import string
+import math
+import tempfile
+import crypt
+
+whiptail = "/usr/bin/whiptail"
+rasconf = "/usr/bin/raspi-config"
+chpasswd = "/usr/sbin/chpasswd"
+reboot = "/sbin/reboot"
+ssh_keygen = "/usr/bin/ssh-keygen"
+
+def run_as_root():
+    if os.getuid() != 0:
+        print("This process needs to be run as root; requesting elevated privilage.")
+        os.execv("/usr/bin/sudo", ["sudo"] + sys.argv)
+
+def ask_something(question, password=False, title=None, default=None):
+    style = "--passwordbox" if password else "--inputbox"
+    args = [whiptail, style, question, "10", "60"]
+    if title is not None:
+        args.insert(1, "--title")
+        args.insert(2, title)
+    if default:
+        args.append(default)
+    p = Popen(args, stderr=PIPE)
+    p.wait()
+    return p.stderr.read()
+
+def ask_yesno(question, height=10, title=None, default_no=False):
+    args = [whiptail, "--yesno", question, str(height), "60"]
+    if title is not None:
+        args.insert(1, "--title")
+        args.insert(2, title)
+    if default_no:
+        args.append("--defaultno")
+    return not call(args)
+
+def ask_menu(question, options, selected=0, title=None, height=10):
+    args = [whiptail, "--radiolist", question, str(height), "60", str(len(options))]
+    if title is not None:
+        args.insert(1, "--title")
+        args.insert(2, title)
+    for i, o in enumerate(options):
+        args.extend([str(i), o, "1" if i == selected else "0"])
+    p = Popen(args, stderr=PIPE)
+    p.wait()
+    output = p.stderr.read()
+    return int(output)
+
+def msgbox(msg_text, height=10, title=None):
+    args = [whiptail, "--msgbox", msg_text, str(height), "60"]
+    if title is not None:
+        args.insert(1, "--title")
+        args.insert(2, title)
+    call(args)
+
+def raspi_config(args, as_bool=False):
+    if isinstance(args, str):
+        args = [args]
+    result = check_output([rasconf, "nonint"]+args)
+    if as_bool:
+        result = bool(int(result))
+    return result
+
+def password_score(pw):
+    if len(pw) == 0:
+        return 0
+    pw = str(pw, "UTF8")
+    # Roughly score password based on both length and complexity
+    lowers = [i for i in pw if i in string.ascii_lowercase]
+    uppers = [i for i in pw if i in string.ascii_uppercase]
+    digits = [i for i in pw if i in string.digits]
+    spaces = [i for i in pw if i in string.whitespace]
+    others = [i for i in pw if i not in lowers and i not in uppers and i not in digits and i not in spaces]
+    score = 0
+    if lowers:
+        score += 20
+    if uppers:
+        score += 20
+    if digits:
+        score += 10
+    if spaces:
+        score += 3    
+    if others:
+        score += 30
+    return math.log(score, 2) * len(pw)
+
+def check_password(user, pw):
+    upw = [i for i in open("/etc/shadow") if i.startswith(user+":")]
+    if not upw:
+        print("User '{}' not found".format(user))
+        return False
+    bits = upw[0].split(":")
+    pwhash = bits[1]
+    return pwhash == crypt.crypt("raspberry", pwhash.rsplit("$",1)[0])
+    
+def set_password(user, pw):
+    p = Popen(chpasswd, stdin=PIPE, stderr=PIPE)
+    out, err = p.communicate("{}:{}\n".format(user, pw).encode("UTF8"))
+    if err or p.returncode:
+        print("Problem setting password for pi user. Error: {}".foramt(err))
+
+def check_ssh_key(key):
+    t = tempfile.NamedTemporaryFile()
+    t.write(key)
+    t.flush()
+    rc = call([ssh_keygen, "-l", "-f", t.name], stdout=PIPE)
+    t.close()
+    return rc == 0
+
+def edit_config(file_name, pattern, replacement):
+    # Edit the configuration file file_name
+    config_lines = open(file_name).readlines()
+    orig_lines = config_lines.copy()
+    
+    # Find all the lines that match pattern
+    if isinstance(pattern, str):
+        pattern = re.compile(pattern)
+    hits = [i for i,l in enumerate(config_lines) if pattern.search(l)]
+
+    if not replacement.endswith("\n"):
+        replacement += "\n"
+        
+    # If any of them are identical to the replacement then do nothing
+    if any(config_lines[i] == replacement for i in hits):
+        return False
+
+    last_edit = -1
+    # If any match but start with a '#' then ignore them
+    # If any match and do not start with a '#' then insert a '#' in front
+    for i in hits:
+        if config_lines[i][0] != "#":
+            config_lines[i] = "#"+config_lines[i]
+            last_edit = -1
+
+    # Check if any of the lines are a commented out version of the replacement
+    reps = [i for i in hits if config_lines[i] == "#"+replacement]
+    if reps:
+        # If any match, remove the comment from the last match
+        config_lines[reps[-1]] = replacement
+    else:                
+        # Otherwise insert the replacement at a suitable place
+        if last_edit == -1:
+            last_edit = hits[-1] if hits else len(config_lines)-1
+        config_lines.insert(last_edit + 1, replacement)
+
+    # Create a backup of the old configuration settings
+    now_time = datetime.datetime.now()
+    with open(file_name+"_"+now_time.format("%Y-%M-%d-%H%M"), "w") as fh:
+        for l in orig_lines:
+            fh.write(l)
+
+    # Write the updated config and atomically move it into place
+    with open(file_name+"__update__", "w") as fh:
+        for l in config_lines:
+            fh.write(l)
+        fh.flush()
+    os.rename(file_name+"__update__", file_name)
+
+    print("Config file {} updated".format(file_name))
+    return True
+
+def write_file_as_pi(file_name, contents, mode=0o644):
+    with open(file_name, "wb") as fh:
+        os.chmod(file_name, mode)
+        fh.write(contents)
+    os.chown(file_name, pi_uid, pi_gid)
+
+#### Collect information from user
+
+run_as_root()
+
+# Get the uid and gid for the pi user
+pi_info = pwd.getpwnam("pi")
+pi_uid, pi_gid = pi_info.pw_uid, pi_info.pw_gid
+
+# Get a new hostname for the device
+old_hostname = raspi_config("get_hostname")
+hostname = ask_something("What hostname would you like to give you your kisok?",
+                         default=old_hostname, title="Set the hostname")
+
+# Get a password for the 'pi' user
+q = "Please enter a new password for the pi user. If you want to leave the password as it is then leave this blank."
+while True:
+    password = ask_something(q, password=True, title="Set a password for the 'pi' user")
+    if not password:
+        if check_password("pi", "raspberry"):
+            if not ask_yesno("The pi user on this computer still has the default password. "
+                             "You are STRONGLY recommended to change this. "
+                             "Are you certain that you want to use the default?",
+                             default_no=True, title="SECURITY ALERT"):
+                continue
+        break
+    pw_verify = ask_something("Please re-enter the password, just in case:", password=True,
+                              title="Confirm the password for the 'pi' user")
+    if password == pw_verify:
+        # The passwords match but we are going to make sure that it's a decent password
+        score = password_score(password)
+        if score < 30:
+            q = "That is a pretty weak passwork. Please enter a longer or more complex password:"
+            continue
+        elif score < 45:
+            if ask_yesno("That password looks a litte on the weak side. Are you sure you want to you it?",
+                         title="Security Warning"):
+                break
+            else:
+                q = "Please enter a new password for the pi user:"
+                continue
+        break
+    q = "Passwords did not match.\nPlease enter the password again:"
+
+# Get an ssh public key for the 'pi' user
+q = "If you have an SSH public key that you would like to use to log in please enter it here (otherwise hit return):"
+while True:
+    ssh_key = ask_something(q, title="Set an SSH key for the 'pi' user")
+    ssh_key = ssh_key.strip()
+    if not ssh_key:
+        break
+    if check_ssh_key(ssh_key):
+        break
+    q = "That does not appear to be a valid SSH key. Please ensure that you include the key type identifier (e.g. 'ssh-rsa') and that you don't have any extra spaces or line breaks in the key data"
+
+# If we got an SSH key, offer to disable password login over the network
+ssh_no_password = False
+if ssh_key:
+    if check_password("pi", "raspberry"):
+        msgbox("An SSH key was provided but the 'pi' user still has the default password. "
+               "Password-based SSH login will be disabled",
+               title="Security warning")
+        ssh_no_password = True
+    else:        
+        ssh_no_password = ask_yesno("Would you like to disable password-based authentication for SSH connections (recommended)? ",
+                                    title="Disable password login via SSH")
+
+# Find out if the user would like to change to orientation of the display
+orientation = 0
+if ask_yesno("Sometimes it is useful for your kiosk display to be rotated or reflected, "
+             "for instance to present in portrait orientation or to project onto a screen "
+             "from behind or to be viewed through a mirror. Would you like to use a "
+             "non-standard orrientation?",
+             height=11, default_no=True, title="Reorientate display"):
+    orientation = ask_menu("By how much would you like to rotate the display?",
+                           ["0 degrees",
+                            "90 degrees clockwise",
+                            "180 degrees",
+                            "270 degrees clockwise"],
+                            title="Rotate display")
+    flip = ask_menu("Would you like to relect the display?",
+                    ["No reflection",
+                     "Reflect horizontally",
+                     "Reflect vertically"],
+                     title="Reflect display")
+    print("Orientation:{} flip:{}".format(orientation, flip))
+    orientation |= (flip << 16) 
+
+# Get a URL to which the device will boot
+q = "Finally, what is the URL of the page you like to the Kiosk to display?"
+while True:
+    kiosk_url = ask_something(q, title="URL of page to be displayed")
+    if kiosk_url.strip():
+        if urlparse(kiosk_url).scheme == "":
+            kiosk_url = "http://"+kiosk_url
+        break
+    q = "Please enter a valid URL for the kiosk to display:"
+
+if not ask_yesno("Here are the settings you provided:\n"
+                 "Hostname: {hostname}\n"
+                 "Password: {password}\n"
+                 "SSH key:  {sshkey}\n"
+                 "Allow password login: {allowpw}\n"
+                 "Orientation: {orient}\n"
+                 "Boot URL: {URL}\n"
+                 "Are these correct?"
+                 "".format(hostname = str(hostname, "ASCII"),
+                           password = ("*" * len(password)) if password else "<unchanged>",
+                           sshkey = (str(ssh_key[:20], "ASCII") + "...") if ssh_key else "<none>",
+                           allowpw = "No" if ssh_no_password else "Yes",
+                           orient = orientation, # It would be nice if this was a pretty string
+                           URL=str(kiosk_url, "ASCII")),
+                 height = 15, title="Confirm settings"):
+    print("Kiosk setup aborted.\nGoodbye")
+    sys.exit(0)
+
+#### Now that we have the configiuration we can set up the system
+
+# If we can expand the filesystem if we can
+can_expand_fs = raspi_config(["get_can_expand"], as_bool=True)
+if can_expand_fs:
+    print("Setting system to expand file system on the next reboot")
+    raspi_config(["do_expand_rootfs"])
+
+# Set the new hostname
+if hostname != old_hostname:
+    print("Setting new hostname")
+    raspi_config(["do_hostname", hostname])
+
+# Reset the password for the pi user if a new one is given
+if password:
+    set_password("pi", password)
+
+# Enable SSH service
+raspi_config(["do_ssh", "0"])
+
+# Optionally set an SSH key for the pi user
+if ssh_key:
+    # Make sure that the .ssh directory exists
+    if not os.path.exists("/home/pi/.ssh"):
+        os.mkdir("/home/pi/.ssh", 0o755)
+        os.chown("/home/pi/.ssh", pi_uid, pi_gid)
+    # Check if there is already an authorized_keys file
+    if os.path.exists("/home/pi/.ssh/authorized_keys"):
+        # Add the key to the existing file it it's not there already
+        with open("/home/pi/.ssh/authorized_keys", "r+b") as fh:
+            if any(ssh_key in i for i in fh):
+                print("SSH key already listed as an authorized key")
+            else:
+                fh.write(ssh_key + b"\n")
+    else:
+        # Create a new authorized_keys file and write the key
+        write_file_as_pi("/home/pi/.ssh/authorized_keys", ssh_key + b"\n")
+        
+# Optionally disable password-based SSH login
+if ssh_no_password:
+    changed = edit_config("/etc/ssh/sshd_config",
+                          "PasswordAuthentication",
+                          "PasswordAuthentication no")
+    if changed:
+        print("sshd configuration updated to not allow password login")
+    else:
+        print("sshd already disallowed password login. No change made")
+
+# Enable auto-login of pi user to a desktop environment
+raspi_config(["do_boot_behaviour", "B4"])
+
+# Create script to start Chromium to the correct URL
+
+print("Writing kiosk URL configuration")
+write_file_as_pi("/home/pi/KIOSK_URL", kiosk_url)
+
+script = b"""#!/bin/bash
+BOOT_URL=$(cat /home/pi/KIOSK_URL)
+/usr/bin/chromium-browser --hide-scrollbars --disable-overlay-scrollbar --kiosk --incognito $BOOT_URL
+"""
+
+write_file_as_pi("/home/pi/start-slideshow.sh", script, mode=0o755)
+
+# Create script to force reload of Chromium page
+script = b"""#!/bin/bash
+export DISPLAY=":0"
+WID=$(xdotool search --onlyvisible --class chromium|head -1)
+xdotool windowactivate ${WID}
+xdotool key ctrl+F5
+"""
+
+write_file_as_pi("/home/pi/reload-slideshow.sh", script, mode=0o755)
+
+# Set up autostart file to start Chromium when the desktop starts
+script = b"""# Autostart file created by Kioskify
+@point-rpi
+@xset s noblank
+@xset s off
+@/home/pi/start-slideshow.sh
+"""
+
+if not os.path.exists("/home/pi/.config"):
+    os.mkdir("/home/pi/.config", 0o700)
+    os.chown("/home/pi/.config", pi_uid, pi_gid)
+if not os.path.exists("/home/pi/.config/lxsession/LXDE-pi"):
+    os.makedirs("/home/pi/.config/lxsession/LXDE-pi", 0o755)
+    os.chown("/home/pi/.config/lxsession", pi_uid, pi_gid)
+    os.chown("/home/pi/.config/lxsession/LXDE-pi", pi_uid, pi_gid)
+
+write_file_as_pi("/home/pi/.config/lxsession/LXDE-pi/autostart", script)
+    
+# Update xserver-command in /etc/lightdm/lightdm.conf to disable screen server and point
+if edit_config("/etc/lightdm/lightdm.conf",
+               "xserver-command",
+               "xserver-command=X -s 0 -dpms -nocursor"):
+    print("X server updated to remove pointer and screen saver")
+
+if edit_config("/boot/config.txt",
+               "display_rotate",
+               "display_rotate=0x{:x}".format(orientation)):
+    print("Display orientation set")
+    
+# Reboot
+if ask_yesno("Would you like reboot into kiosk mode now?",
+             title="Reboot now?"):
+    print("Rebooting system now...")
+    os.execv(reboot, ["reboot"])
+
+print("All changes made. Many of these changes will not take effect until you reboot the system.")
