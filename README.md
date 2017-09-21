@@ -22,7 +22,8 @@ update_config=1
 network={
         ssid="MyNetworkName"
         psk="MyNetworkPassword"
-}```
+}
+```
 
 
 
