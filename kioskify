@@ -122,7 +122,7 @@ def check_password(user, pw):
         return False
     bits = upw[0].split(":")
     pwhash = bits[1]
-    return pwhash == crypt.crypt("raspberry", pwhash.rsplit("$",1)[0])
+    return pwhash == crypt.crypt(pw, pwhash.rsplit("$",1)[0])
     
 def set_password(user, pw):
     p = Popen(chpasswd, stdin=PIPE, stderr=PIPE)
